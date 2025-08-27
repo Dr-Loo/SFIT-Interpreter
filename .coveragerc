@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = src\sfit_sgf
+
+[report]
+omit =
+    .venv\*
+    tests\*
+    _orphan_root_tests\*

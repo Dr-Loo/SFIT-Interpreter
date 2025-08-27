@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/sfit_sgf/__init__.py
+src/sfit_sgf/core.py
+src/sfit_sgf.egg-info/PKG-INFO
+src/sfit_sgf.egg-info/SOURCES.txt
+src/sfit_sgf.egg-info/dependency_links.txt
+src/sfit_sgf.egg-info/top_level.txt
+tests/test_alpha_rho_S_basics.py
+tests/test_core_branches.py
+tests/test_core_gapfill.py
+tests/test_drift_vs_dk_budget.py
+tests/test_entropy_edge_cases.py
+tests/test_helpers_cov_gaps.py
+tests/test_helpers_more_edges.py
+tests/test_projector_idempotence.py

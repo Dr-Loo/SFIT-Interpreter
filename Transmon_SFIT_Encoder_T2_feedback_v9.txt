@@ -1,0 +1,72 @@
+# --- helpers (place once, e.g., in Transmon_SFIT_Encoder_T2_fix_M_Adjoint.py) ---
+def restrict_M_adjoint(P: np.ndarray, M1c: np.ndarray, M1f_current: np.ndarray) -> np.ndarray:
+    """M-adjoint restriction for the CURRENT fine metric."""
+    return np.linalg.inv(M1c) @ (P.T @ M1f_current)
+
+# --- inside your feedback run() loop (v9 core) ---
+# thresholds
+EPS_ALPHA = 1e-3          # coarse harmonic coefficient error
+EPS_S     = 5e-3          # entropy drift
+DK_MAX    = 50.0          # “safe” DK budget proxy (unitless)
+BIAS_MIN  = np.array([0.95, 0.95])
+BIAS_MAX  = np.array([1.05, 1.05])
+
+# anneal schedules
+noise_now = noise * max(0.0, 1.0 - it/(0.8*steps))
+h_harm    = harmonic_noise_frac * max(0.0, 1.0 - it/(0.6*steps))
+
+# build fine operators and CURRENT fine metric
+d0f, d1f, M0f, M1f_base, M2f = build_dec_mats(Nx_f, Ny_f)
+M1f = apply_metric_bias(M1f_base, bias_x=bias_x, bias_y=bias_y, Nx=Nx_f, Ny=Ny_f)
+
+# IMPORTANT: recompute R for the *current* fine metric
+R_current = restrict_M_adjoint(P, M1c, M1f)
+
+# projector: maybe recalibrate
+if it == 0:
+    Pif, Bf = transported_projector(M1f, P, Bc)
+else:
+    # quick diagnostics using previous projector
+    v_f_clean = P @ v_c
+    eta_f = quasiparticle_noise_hybrid(M1f, v_f_clean.size, noise_now, rng, Bf, h_harm)
+    v_c_rec = R_current @ (Pif @ (v_f_clean + eta_f))
+    rho_r, S_r, alpha_r = cycle_weights(M1c, Bc, v_c_rec)
+
+    # DK budget w.r.t. *current* metric
+    gap, DK = dk_budget_and_gap(d0c, d1c, M0c, M1c, M2c, d0f, d1f, M0f, M1f, M2f, P, R_current)
+
+    need_recal = (np.linalg.norm(alpha_r - alpha_t) > EPS_ALPHA) or (abs(S_r - S_t) > EPS_S) or (DK > DK_MAX)
+    if need_recal:
+        Pif, Bf = transported_projector(M1f, P, Bc)  # re-orthonormalize in current M1f
+
+# forward + recover with CURRENT R and (maybe) refreshed Pif
+v_f_clean = P @ v_c
+eta_f = quasiparticle_noise_hybrid(M1f, v_f_clean.size, noise_now, rng, Bf, h_harm)
+v_c_rec = R_current @ (Pif @ (v_f_clean + eta_f))
+rho_r, S_r, alpha_r = cycle_weights(M1c, Bc, v_c_rec)
+
+# tiny Adam step on biases (optional, keeps things smooth)
+if it == 0:
+    m = np.zeros(2); v = np.zeros(2)
+def eval_loss(bx, by):
+    M1f_tmp = apply_metric_bias(M1f_base, bx, by, Nx_f, Ny_f)
+    R_tmp   = restrict_M_adjoint(P, M1c, M1f_tmp)
+    Pif_tmp, Bf_tmp = transported_projector(M1f_tmp, P, Bc)
+    v_rec_tmp = R_tmp @ (Pif_tmp @ (v_f_clean + eta_f))
+    _, _, a_tmp = cycle_weights(M1c, Bc, v_rec_tmp)
+    return np.linalg.norm(a_tmp - alpha_t)**2
+
+# finite-diff gradient (robust, cheap). Complex-step is fine too if evaluate() stays complex-safe.
+eps = 1e-3
+g = np.array([
+    (eval_loss(bias_x+eps, bias_y) - eval_loss(bias_x-eps, bias_y))/(2*eps),
+    (eval_loss(bias_x, bias_y+eps) - eval_loss(bias_x, bias_y-eps))/(2*eps),
+])
+
+# Adam update
+beta1, beta2, epsAdam = 0.9, 0.999, 1e-8
+m = beta1*m + (1-beta1)*g
+v = beta2*v + (1-beta2)*(g*g)
+mhat = m/(1-beta1**(it+1)); vhat = v/(1-beta2**(it+1))
+step = 0.02 * mhat / (np.sqrt(vhat) + epsAdam)
+bias_x, bias_y = np.clip([bias_x, bias_y] - step, BIAS_MIN, BIAS_MAX)
