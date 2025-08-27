@@ -2,51 +2,94 @@ import numpy as np
 
 class SemanticEntropy:
     """
-    Smooth sector histogram over face features g(F) -> p (probabilities).
-    Provides S_U and grad wrt Φ via chain rule.
+    Histogram-style entropy over a set of symbolic bins.
+
+    - If sigma is None or <= 0: hard-binning via nearest-bin counts (piecewise constant),
+      gradient is zero almost everywhere.
+    - If sigma > 0: soft/gaussian kernel around each bin; we provide an analytic
+      gradient of S = -sum_j p_j log p_j w.r.t. field samples Phi.
     """
-    def __init__(self, centers, sigma=0.2, eps=1e-12):
-        self.centers = np.asarray(centers, dtype=float)
-        self.sigma = float(sigma)
+    def __init__(self, bins, sigma=0.1, eps=1e-12):
+        self.bins = np.asarray(bins, dtype=float).ravel()
+        # Allow sigma=None / <=0 to mean "hard binning"
+        if sigma is None:
+            self.sigma = None
+        else:
+            s = float(sigma)
+            self.sigma = None if s <= 0.0 else s
         self.eps = float(eps)
 
-    def features(self, F):
-        # default feature: magnitude
-        return np.sqrt(F*F + self.eps)
+    @property
+    def uses_soft(self) -> bool:
+        return self.sigma is not None and self.sigma > 0.0
 
-    def probs(self, g):
-        # soft bins along centers
-        C = self.centers[None, :]
-        W = np.exp(-0.5 * ((g[:, None] - C) / self.sigma)**2)  # shape: (n_faces, K)
-        Z = np.sum(W, axis=0) + self.eps
-        p = Z / np.sum(Z)
-        return p, W, Z
+    def prob(self, Phi):
+        """Return p over bins from field samples Phi."""
+        Phi = np.asarray(Phi, dtype=float).ravel()
+        m = self.bins.size
+        if Phi.size == 0:
+            return np.zeros(m, dtype=float)
 
-    def S_and_gradF(self, F):
+        if not self.uses_soft:
+            # Hard-binning: nearest bin
+            idx = np.argmin((Phi[:, None] - self.bins[None, :])**2, axis=1)
+            counts = np.bincount(idx, minlength=m).astype(float)
+        else:
+            # Soft/gaussian kernel weights
+            diff = Phi[:, None] - self.bins[None, :]
+            W = np.exp(-0.5 * (diff / self.sigma)**2)
+            counts = W.sum(axis=0)  # (m,)
+
+        total = counts.sum()
+        if not np.isfinite(total) or total <= 0:
+            # Fallback to uniform if degenerate
+            return np.full(m, 1.0 / m, dtype=float)
+
+        p = counts / total
+        # Numerical clip for safety
+        p = np.clip(p, 0.0, 1.0)
+        return p
+
+    def grad(self, Phi):
         """
-        Returns S_U and ∂S_U/∂F (vector on faces).
+        dS/dPhi for S = -sum_j p_j log p_j.
+
+        Hard-binning -> zero gradient (piecewise constant).
+        Soft kernel -> analytic gradient via chain rule.
         """
-        g = self.features(F)  # (n_faces,)
-        p, W, Z = self.probs(g)  # p: (K,)
-        # entropy and dS/dp
-        S = float(-(p * (np.log(p + self.eps))).sum())
-        dS_dp = -(np.log(p + self.eps) + 1.0)  # (K,)
+        Phi = np.asarray(Phi, dtype=float).ravel()
+        n = Phi.size
+        if n == 0:
+            return np.zeros(0, dtype=float)
 
-        # dp/dg_f
-        # Z_k = sum_f W_fk,  p_k = Z_k / sum_j Z_j
-        Ztot = np.sum(Z) + self.eps
-        dZ_dg = (W * (self.centers[None, :] - g[:, None]) / (self.sigma**2))  # derivative of W wrt g with sign
-        dZ_dg *= -1.0  # d/dg exp(-(...)) factor
+        if not self.uses_soft:
+            return np.zeros_like(Phi)
 
-        # dp_k/dg_f = (dZ_k/dg_f * Ztot - Z_k * sum_j dZ_j/dg_f) / Ztot^2
-        sum_dZdg_over_k = np.sum(dZ_dg, axis=1)  # (n_faces,)
-        dp_dg = (dZ_dg * Ztot - Z[None, :] * sum_dZdg_over_k[:, None]) / (Ztot**2)  # (n_faces, K)
+        # Soft case
+        diff = Phi[:, None] - self.bins[None, :]            # (n, m)
+        W = np.exp(-0.5 * (diff / self.sigma)**2) + self.eps
+        C = W.sum(axis=0)                                   # (m,)
+        Csum = C.sum() + self.eps
+        p = C / Csum
+        p = np.clip(p, 1e-15, 1.0)
+        logp1 = 1.0 + np.log(p)
 
-        # dS/dg_f = sum_k dS/dp_k * dp_k/dg_f
-        dS_dg = dp_dg @ dS_dp  # (n_faces,)
+        # dw/dPhi = -(diff / sigma^2) * W
+        dw = W * (-(diff) / (self.sigma**2))                # (n, m)
 
-        # dg/ dF_f (smooth abs): F / sqrt(F^2 + eps)
-        dgdF = F / np.sqrt(F*F + self.eps)
+        g = np.empty(n, dtype=float)
+        for i in range(n):
+            dw_i = dw[i, :]                                 # (m,)
+            s1 = dw_i.sum()
+            # dp_j/dPhi_i = (dw_ij * Csum - C_j * s1) / Csum^2
+            dp = (dw_i * Csum - C * s1) / (Csum**2)
+            g[i] = -np.dot(logp1, dp)
 
-        dS_dF = dS_dg * dgdF  # chain rule
-        return S, dS_dF
+        g[~np.isfinite(g)] = 0.0
+        return g
+
+    def entropy(self, Phi) -> float:
+        """Shannon entropy of the current bin probabilities."""
+        p = self.prob(Phi)
+        nz = p > 0
+        return float(-(p[nz] * np.log(p[nz])).sum())

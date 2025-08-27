@@ -1,57 +1,60 @@
 import numpy as np
-from .lattice import Incidence, Hodge
+from dataclasses import dataclass
+from .lattice import Incidence, Hodge, curl, divergence
 from .entropy import SemanticEntropy
 
+
+@dataclass
 class PhiState:
-    """
-    Minimal U(1) Φ-field state on a fixed lattice.
-    Φ: (n_edges,), F = D2 @ Φ (on faces).
-    J: (n_faces,) source term in the equation.
-    """
-    def __init__(self, inc: Incidence, h: Hodge, Phi, J=None, entropy: SemanticEntropy=None, nu=0.0, dt=1e-2):
-        self.D2 = inc.D2
-        self.star1 = h.star1
-        self.star2 = h.star2
-        self.Phi = np.array(Phi, dtype=float)
-        self.nu = float(nu)
-        self.dt = float(dt)
-        self.J = np.zeros(self.D2.shape[0], dtype=float) if J is None else np.array(J, dtype=float)
-        self.entropy = entropy
+    inc: Incidence
+    h: Hodge
+    Phi: np.ndarray          # edges
+    J: np.ndarray            # faces (source)
+    entropy: SemanticEntropy | None
+    nu: float = 0.0
+    dt: float = 0.1
 
-    def curvature(self):
-        return self.D2 @ self.Phi  # F on faces
+    # ---- instance helpers expected by tests ----
+    def residual(self) -> np.ndarray:
+        return residual(self)
 
-    def residual(self):
-        """
-        r = d*F - *J + nu * ∇S_U  (all on faces for this abelian prototype)
-        We compute d*F as D2 @ Φ mapped to faces and scaled by star2 if needed.
-        Here we keep * as identity (star2=1) for simplicity.
-        """
-        F = self.curvature()
-        r = F - self.J  # since * = I and d*F ~ F in this simple setup
-        if self.entropy and self.nu != 0.0:
-            _, dS_dF = self.entropy.S_and_gradF(F)
-            r = r + self.nu * dS_dF
-        return r
+    def residual_norm(self) -> float:
+        return residual_norm(self)
 
-    def grad_Phi(self):
-        """
-        ∇_Φ (1/2 ||r||^2 ) = (∂r/∂Φ)^T r.
-        r = F - J + nu dS/dF, F = D2 Φ.
-        ∂r/∂Φ = D2 + nu * (∂/∂Φ)(dS/dF) ~ D2 if we neglect second derivative for a stable first-order scheme.
-        """
-        r = self.residual()
-        return self.D2.T @ r  # Gauss-Newton / first-order
+    def step(self, n: int = 1) -> "PhiState":
+        """Advance the state by n Euler steps (default: 1)."""
+        for _ in range(int(n)):
+            step(self)
+        return self
 
-    def step(self, n=1):
-        for _ in range(n):
-            g = self.grad_Phi()
-            self.Phi = self.Phi - self.dt * g
 
-def step_until(state: PhiState, iters=1000, tol=1e-6):
-    for _ in range(iters):
-        r = state.residual()
-        if np.linalg.norm(r) < tol:
-            break
-        state.step(1)
+
+# ---- functional API (used by the instance wrappers) ----
+
+def residual(state: PhiState) -> np.ndarray:
+    """Face residual r = curl(Phi) - J."""
+    return curl(state.inc, state.Phi) - state.J
+
+
+def residual_norm(state: PhiState) -> float:
+    return float(np.linalg.norm(residual(state)))
+
+
+def step(state: PhiState) -> PhiState:
+    r_faces = residual(state)
+    g = divergence(state.inc, r_faces)  # back to edges
+    if state.entropy is not None and state.nu != 0.0:
+        g = g + state.nu * state.entropy.grad(state.Phi)
+    state.Phi = state.Phi - state.dt * g
     return state
+
+
+def step_until(state: PhiState, iters: int = 200, tol: float = 1e-6) -> PhiState:
+    for _ in range(int(iters)):
+        if residual_norm(state) <= tol:
+            break
+        step(state)
+    return state
+
+
+__all__ = ["PhiState", "residual", "residual_norm", "step", "step_until"]

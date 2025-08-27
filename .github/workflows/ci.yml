@@ -22,6 +22,10 @@ jobs:
         run: |
           python -m pytest --cov=src/sfit_sgf --cov-report=term-missing --cov-fail-under=90 -q
 
+       - name: Run φ-field smoke (Maxwell + entropy)
+        run: |
+          python examples/ci_phi_smoke.py
+
       - name: Run Φ-field quickstart (smoke)
         run: |
           python examples/phi_flow_minimal.py
@@ -37,3 +41,10 @@ jobs:
         with:
           name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
           path: coverage.xml
+      - name: Run phi point-source (Maxwell sanity)
+        run: |
+          python examples/phi_point_source.py --steps 200 --nu 0
+
+      - name: Run phi point-source (entropy descent smoke)
+        run: |
+          python examples/phi_point_source.py --steps 200 --nu 1e-2
